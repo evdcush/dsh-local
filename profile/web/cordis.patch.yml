@@ -1,0 +1,102 @@
+# DeepSeek Harness — web profile, single-user, local-only deployment.
+#
+# Layer stack, earliest first:
+#   @deepseek-ai/dsh-base bundle
+#   @deepseek-ai/dsh-web-app bundle
+#   this file ($DSH_HOME/profiles/web/cordis.patch.yml)
+#
+# A patch entry replaces the targeted row's ENTIRE config, so every entry
+# below restates the keys it keeps. The HMR row reloads this file live: no
+# restart needed after an edit.
+
+# ── model route: the local LiteLLM gateway (OpenAI Chat Completions) ──────
+# No DeepSeek API key or account is configured anywhere in this deployment,
+# so no request ever reaches the official DeepSeek endpoints.
+- id: llm-pi-ai
+  config:
+    providers:
+      litellm:
+        displayName: LiteLLM
+        api: openai-completions
+        baseURL: !!js process.env.LITELLM_BASE_URL ?? 'http://litellm:4000/v1'
+        apiKeyEnv: LITELLM_API_KEY
+        # LiteLLM reads max_tokens; keep the OpenAI default role (the model
+        # below declares no reasoning, so no developer-role prompt is sent).
+        compat:
+          maxTokensField: max_tokens
+        models:
+          - id: !!js process.env.DSH_MODEL ?? 'swol-doge'
+
+# New sessions start on the local gateway's model.
+- id: agent-default-model
+  config:
+    provider: litellm
+    model: !!js process.env.DSH_MODEL ?? 'swol-doge'
+
+# ── local-only: no session data leaves this machine ───────────────────────
+# Stop the dsh_session_log request contribution (official DeepSeek upload).
+- id: session-log-deepseek
+  config:
+    enabled: false
+    maxBytes: 8388608
+
+# OTel session telemetry: DISABLED constructs no transport; nothing is
+# exported and the production collector URL is never contacted.
+- id: session-telemetry-otel
+  config:
+    mode: DISABLED
+
+# ── tools ──────────────────────────────────────────────────────────────────
+# web_search is disabled on the host-plane tool (headless/SDK surfaces).
+# In the Web UI each agent preset registers web_search itself; without a
+# usable search provider it fails locally with WEB_PROVIDER_UNAVAILABLE and
+# sends nothing. The two provider rows below pin their credential reference
+# to a variable this deployment never sets, so web_search stays local even
+# if a DEEPSEEK_API_KEY appears in the environment. web_fetch keeps the
+# anonymous local HTTP(S) fetcher (direct fetches, no vendor API). The
+# search-gateway MCP entry below is the local replacement for search.
+- id: tool-web
+  config:
+    search: false
+    fetch: true
+    fetchTimeoutMs: 30000
+    fetchMaxOutputChars: 200000
+
+# DeepSeek Search API provider: credential pinned to a variable that is
+# never set, so no search request can be authenticated or sent.
+- id: web-deepseek-api
+  config:
+    count: 10
+    searchRequestsPerSecond: 5
+    sendOriginalQuestion: false
+    searchApiKeyEnv: DSH_DISABLED_SEARCH_KEY
+
+# Legacy DeepSeek Messages search provider: same treatment.
+- id: web-search-deepseek
+  config:
+    apiKeyEnv: DSH_DISABLED_SEARCH_KEY
+
+# Optional local web search through your Search Gateway MCP server
+# (SearXNG + Crawl4AI on ai-backend). Disable with DSH_MCP_SEARCH_GATEWAY=0.
+# Startup failure only warns (failOnStartupError: false), so a stopped
+# gateway does not block dsh boot.
+- insert:
+    - id: mcp-search-gateway
+      name: '@deepseek-ai/dsh-mcp-client'
+      disabled: !!js process.env.DSH_MCP_SEARCH_GATEWAY === '0'
+      config:
+        transport: streamable-http
+        serverName: search-gateway
+        url: !!js process.env.DSH_MCP_SEARCH_GATEWAY_URL ?? 'http://search-gateway:8080/mcp'
+        headers: !!js "process.env.SEARCH_GATEWAY_API_KEY ? { authorization: 'Bearer ' + process.env.SEARCH_GATEWAY_API_KEY } : {}"
+        toolCallTimeoutMs: 60000
+        closeTimeoutMs: 5000
+        expandTemplates: false
+        failOnStartupError: false
+
+# ── sandbox: agent writes stay inside the mounted workspace ───────────────
+# DSH_PERMISSION_MODE: read-only | workspace-write | danger-full-access
+- id: sandbox-policy
+  config:
+    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
+    workspaceRoot: /workspace

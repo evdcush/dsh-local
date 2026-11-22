@@ -1,0 +1,113 @@
+name: dsh
+
+# SELF-HOSTED DEEPSEEK HARNESS (dsh) — WEB UI, LOCAL-ONLY
+# ========================================================
+# Single-user agent harness (https://github.com/deepseek-ai/deepseek-harness).
+# Model inference runs against the local LiteLLM gateway on ai-backend.
+# No DeepSeek API key, account, telemetry, or session upload is configured:
+# the local-only enforcement lives in profile/web/cordis.patch.yml.
+#
+# SERVING:
+#   Host:   http://127.0.0.1:49175
+#   LOGIN:  docker compose logs dsh   # "dsh web:" line carries a per-start
+#                                     # launch token; open that URL in a browser
+#
+# TAILSCALE UI:
+#   .env:   DSH_PUBLIC_URL=https://<device>.<tailnet>.ts.net:8445/
+#           DSH_TRUSTED_HOSTS=<device>.<tailnet>.ts.net
+#   tailscale serve --bg --https=8445 http://127.0.0.1:49175
+#
+# RUNNING:
+#   docker network inspect ai-backend >/dev/null
+#   cp .env.example .env
+#   docker compose up -d --build
+#   docker compose logs dsh
+#   FIRST USE: open the login URL, choose a workspace (e.g. /workspace),
+#   send a task. The model is already configured (LiteLLM). Leave the
+#   DeepSeek card on the Models page empty to stay local.
+#
+# STORAGE:
+#   dsh home:  ./data/dsh     sessions, credentials, profile patch, logs
+#   agents:    ./data/agents  AGENTS.md, skills/ (shared agent config root)
+#   workspace: ./workspace    agent writes are fenced here by default
+#
+# SECURITY:
+#   Port 49175 is bound to localhost only. dsh authenticates every API call
+#   with a per-start launch token and a signed session cookie (30 days);
+#   the printed URL contains that credential. Remote browser access is
+#   private-tailnet only.
+#
+# UPDATING:
+#   bump DSH_VERSION in .env, then docker compose up -d --build.
+#   dsh is in rapid developer preview and ships breaking changes; after an
+#   upgrade, sanity-check the composition with
+#   docker compose run --rm --entrypoint dsh dsh --profile web --dump-config
+
+networks:
+  ai-backend:
+    external: true
+
+services:
+  dsh:
+    build:
+      context: .
+      args:
+        DSH_VERSION: ${DSH_VERSION:-0.2.2-rc.1}
+    image: local/dsh:latest
+    container_name: dsh
+    restart: unless-stopped
+    init: true
+    working_dir: /workspace
+
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      # dsh data roots, mounted below.
+      DSH_HOME: /data/dsh
+      DSH_AGENTS_HOME: /data/agents
+      # Model route: the local LiteLLM gateway on ai-backend.
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000/v1}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:?Set LITELLM_API_KEY in .env}
+      DSH_MODEL: ${DSH_MODEL:-swol-doge}
+      # Permission preset: read-only | workspace-write | danger-full-access
+      DSH_PERMISSION_MODE: ${DSH_PERMISSION_MODE:-workspace-write}
+      # Listener port inside the container (keep in sync with the mapping).
+      DSH_PORT: ${DSH_PORT:-3080}
+      # Optional tailscale exposure (see header).
+      DSH_PUBLIC_URL: ${DSH_PUBLIC_URL:-}
+      DSH_TRUSTED_HOSTS: ${DSH_TRUSTED_HOSTS:-}
+      # Local web search via your Search Gateway MCP server (0 = off).
+      DSH_MCP_SEARCH_GATEWAY: ${DSH_MCP_SEARCH_GATEWAY:-1}
+      DSH_MCP_SEARCH_GATEWAY_URL: ${DSH_MCP_SEARCH_GATEWAY_URL:-http://search-gateway:8080/mcp}
+      SEARCH_GATEWAY_API_KEY: ${SEARCH_GATEWAY_API_KEY:-}
+
+      DO_NOT_TRACK: true
+
+    ports:
+      - "127.0.0.1:${DSH_HOST_PORT:-49175}:3080"
+
+    volumes:
+      # dsh data root: sessions, credentials, profile, logs, storages, cache.
+      - ./data/dsh:/data/dsh
+      # Shared agent config root: AGENTS.md, skills/.
+      - ./data/agents:/data/agents
+      # The workspace the agent works in; writes are fenced here by default.
+      - ./workspace:/workspace
+      - ./reference:/reference
+      # Profile definition seeded into $DSH_HOME on first start.
+      - ./profile:/opt/dsh/profile:ro
+
+
+
+    healthcheck:
+      # No token, the entry page answers 401 — a live auth fence is healthy.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "const ifs=Object.values(require('os').networkInterfaces()).flat();const a=ifs.find(x=>x.family==='IPv4'&&!x.internal);if(!a)process.exit(1);fetch('http://'+a.address+':'+(process.env.DSH_PORT||'3080')+'/',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.status===200||r.status===401?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    networks:
+      - ai-backend
